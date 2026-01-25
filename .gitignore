@@ -1,0 +1,61 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Arduino build artifacts
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.eep
+*.lst
+*.sym
+*.lss
+*.map
+
+# IDE specific
+.vscode/
+*.code-workspace
+.idea/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Quarto generated files
+guide.html
+guide.pdf
+guide_files/
+*.quarto_ipynb
+.quarto/
+_site/
+_book/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Log files
+*.log
+
+# Compiled documentation
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
+
+# Claude Code
+.claude/settings.local.json
