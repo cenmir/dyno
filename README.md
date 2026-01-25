@@ -127,7 +127,7 @@ help              # Show all commands
 A Jupyter notebook is provided for automated testing and visualization:
 
 ```bash
-pip install pyserial matplotlib ipywidgets jupyter
+uv pip install pyserial matplotlib ipywidgets jupyter
 jupyter notebook tools/dyno_control.ipynb
 ```
 
