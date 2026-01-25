@@ -11,10 +11,11 @@ An Arduino-controlled dynamometer for characterizing stepper motor and BLDC moto
 This dynamometer uses a dual-motor system with **closed-loop PID speed control** to maintain constant test motor RPM while progressively applying brake load. Key features:
 
 - **PID-controlled constant speed** - Maintains set RPM even under varying load
+- **Automated torque testing** - `runTest` command with stall detection
 - **AS5600 magnetic sensor** - Contactless RPM measurement (no dust issues)
 - **HX711 load cell** - Precise torque measurement via brake arm force
+- **Python/Jupyter interface** - Generate torque curves with interactive notebook
 - **Serial command interface** - Easy control via Serial Monitor
-- **Educational modules** - Standalone examples for learning
 
 **Inspiration:** [Engineer Bo's NEMA17 Dynamometer](https://www.youtube.com/watch?v=MNTuMiNC2TU)
 
@@ -80,6 +81,11 @@ Type 'help' for available commands
 ## Commands
 
 ```
+# Automated Testing
+runTest 500       # Run automated torque test at 500 RPM
+abortTest         # Abort running test
+
+# Manual Control
 setRPM 100        # Set test motor to 100 RPM (PID controlled)
 status            # Show current RPM, torque, brake position
 autoStatus true   # Enable live status updates every 500ms
@@ -99,12 +105,36 @@ help              # Show all commands
 
 ## Test Procedure
 
+### Automated (Recommended)
+
+1. **Calibrate load cell** (first time only): `calibrate`
+2. **Prepare**: `brakeHome` then `tare`
+3. **Run test**: `runTest 500` (runs automatically until stall)
+4. **Record result**: Note the "Maximum torque at X RPM" value
+5. **Repeat** at different RPM values: `runTest 600`, `runTest 700`, etc.
+
+### Manual
+
 1. **Calibrate load cell** (first time only): `calibrate`
 2. **Prepare**: `brakeHome` then `tare`
 3. **Run test**: `setRPM 600` then `autoStatus true`
 4. **Apply load**: `brakeApply 100` (repeat gradually)
 5. **Find max torque**: Keep applying brake until motor stalls
 6. **Repeat** at different RPM values to build torque-speed curve
+
+## Python Interface
+
+A Jupyter notebook is provided for automated testing and visualization:
+
+```bash
+pip install pyserial matplotlib ipywidgets jupyter
+jupyter notebook tools/dyno_control.ipynb
+```
+
+Features:
+- Interactive buttons for test control
+- Automated multi-RPM curve generation
+- Real-time torque-speed curve plotting
 
 ## Project Structure
 
@@ -117,6 +147,8 @@ dyno/
 │   │   └── SpeedController.h     # PID controller class
 │   └── SerialCommander/
 │       └── SerialCommander.h     # Command handler
+├── tools/
+│   └── dyno_control.ipynb        # Python/Jupyter control panel
 ├── examples/
 │   ├── AS5600_Test/              # Sensor test
 │   ├── loadcellTest/             # Load cell calibration

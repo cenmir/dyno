@@ -61,6 +61,18 @@ unsigned long lastStatusTime = 0;
 bool autoStatus = false;
 long brakePosition = 0;
 
+// === AUTOMATED TEST STATE ===
+bool testRunning = false;
+float testTargetRPM = 0;
+float testMaxTorque = 0;
+float testTorqueAtStall = 0;
+unsigned long testStallStartTime = 0;
+unsigned long testLastBrakeTime = 0;
+int testBrakeIncrement = 50;       // Steps per brake increment
+unsigned long testBrakeInterval = 500; // ms between brake increments
+float testStallThreshold = 0.90;   // Stall if RPM < 90% of target
+unsigned long testStallDuration = 1000; // ms below threshold to confirm stall
+
 // === FORWARD DECLARATIONS ===
 void displayStatus();
 float getTorque();
@@ -78,6 +90,9 @@ void handleReadTorque(SerialCommander* c);
 void handleTare(SerialCommander* c);
 void handleCalibrate(SerialCommander* c);
 void handleHelp(SerialCommander* c);
+void handleRunTest(SerialCommander* c);
+void handleAbortTest(SerialCommander* c);
+void runTestStep();
 
 
 void setup() {
@@ -126,6 +141,8 @@ void setup() {
   cmd.addCommand("calibrate", handleCalibrate);
   cmd.addCommand("stop", handleStop);
   cmd.addCommand("help", handleHelp);
+  cmd.addCommand("runTest", handleRunTest);
+  cmd.addCommand("abortTest", handleAbortTest);
 
   Serial.println("Type 'help' for available commands");
 }
@@ -134,6 +151,11 @@ void loop() {
   cmd.process();
   speedController.update();
   brakeMotor.run();
+
+  // Run automated test step if active
+  if (testRunning) {
+    runTestStep();
+  }
 
   if (autoStatus && (millis() - lastStatusTime > 500)) {
     displayStatus();
@@ -232,6 +254,10 @@ void handleStop(SerialCommander* c) {
 
 void handleHelp(SerialCommander* c) {
   Serial.println("\n=== Dyno Commands ===");
+  Serial.println("\n--- Automated Testing ---");
+  Serial.println("runTest <rpm>           - Run automated torque test at specified RPM");
+  Serial.println("abortTest               - Abort running test");
+
   Serial.println("\n--- Test Motor & PID ---");
   Serial.println("setRPM <value>          - Set target RPM (0 to disable)");
   Serial.println("status                  - Display current system status");
@@ -316,4 +342,132 @@ void calibrate() {
   Serial.print("L); \nLoadCell.set_scale(");
   Serial.print(scale, 15);
   Serial.print("f);\n\n");
+}
+
+// ==================== Automated Test Functions ====================
+
+void handleRunTest(SerialCommander* c) {
+  if (testRunning) {
+    Serial.println("ERROR: Test already running. Use 'abortTest' to cancel.");
+    return;
+  }
+
+  float rpm = c->getFloat(0);
+  if (rpm <= 0) {
+    Serial.println("Usage: runTest <rpm>");
+    Serial.println("Example: runTest 500");
+    return;
+  }
+
+  // Initialize test
+  testTargetRPM = rpm;
+  testMaxTorque = 0;
+  testTorqueAtStall = 0;
+  testStallStartTime = 0;
+  testLastBrakeTime = millis();
+  testRunning = true;
+
+  // Return brake to home first
+  brakeMotor.moveTo(0);
+  brakePosition = 0;
+
+  // Start motor at target RPM
+  speedController.setTargetRPM(rpm);
+
+  Serial.println("\n=== AUTOMATED TEST STARTED ===");
+  Serial.print("Target RPM: ");
+  Serial.println(rpm);
+  Serial.print("Stall threshold: ");
+  Serial.print(testStallThreshold * 100, 0);
+  Serial.println("% of target");
+  Serial.println("Waiting for motor to stabilize...");
+  Serial.println("DATA:RPM,Torque(Nm),BrakePos");
+}
+
+void handleAbortTest(SerialCommander* c) {
+  if (!testRunning) {
+    Serial.println("No test running.");
+    return;
+  }
+
+  testRunning = false;
+  speedController.setTargetRPM(0);
+  brakeMotor.moveTo(0);
+  brakePosition = 0;
+
+  Serial.println("\n=== TEST ABORTED ===");
+  Serial.print("Max torque recorded: ");
+  Serial.print(testMaxTorque, 4);
+  Serial.println(" Nm");
+}
+
+void runTestStep() {
+  float currentRPM = speedController.getCurrentRPM();
+  float currentTorque = getTorque();
+  unsigned long now = millis();
+
+  // Wait for brake motor to finish moving
+  if (brakeMotor.isRunning()) {
+    return;
+  }
+
+  // Check if speed is within acceptable range
+  float rpmRatio = currentRPM / testTargetRPM;
+  bool speedOK = (rpmRatio >= testStallThreshold);
+
+  // Track maximum torque while maintaining speed
+  if (speedOK && currentTorque > testMaxTorque) {
+    testMaxTorque = currentTorque;
+  }
+
+  // Stall detection: RPM below threshold for sustained period
+  if (!speedOK) {
+    if (testStallStartTime == 0) {
+      testStallStartTime = now;
+    } else if (now - testStallStartTime >= testStallDuration) {
+      // STALL CONFIRMED
+      testTorqueAtStall = currentTorque;
+      testRunning = false;
+
+      Serial.println("\n=== STALL DETECTED ===");
+      Serial.print("RESULT:maxTorque=");
+      Serial.print(testMaxTorque, 4);
+      Serial.print(",stallTorque=");
+      Serial.print(testTorqueAtStall, 4);
+      Serial.print(",targetRPM=");
+      Serial.print(testTargetRPM, 1);
+      Serial.print(",stallRPM=");
+      Serial.println(currentRPM, 1);
+
+      Serial.println("\n--- Test Complete ---");
+      Serial.print("Maximum torque at ");
+      Serial.print(testTargetRPM, 0);
+      Serial.print(" RPM: ");
+      Serial.print(testMaxTorque, 4);
+      Serial.println(" Nm");
+
+      // Stop motor and return brake
+      speedController.setTargetRPM(0);
+      brakeMotor.moveTo(0);
+      brakePosition = 0;
+      return;
+    }
+  } else {
+    testStallStartTime = 0; // Reset stall timer if speed recovered
+  }
+
+  // Apply brake incrementally
+  if (now - testLastBrakeTime >= testBrakeInterval) {
+    brakeMotor.move(testBrakeIncrement);
+    brakePosition += testBrakeIncrement;
+    testLastBrakeTime = now;
+
+    // Output data point for logging
+    Serial.print("DATA:");
+    Serial.print(currentRPM, 1);
+    Serial.print(",");
+    Serial.print(currentTorque, 4);
+    Serial.print(",");
+    Serial.println(brakePosition);
+  }
 }

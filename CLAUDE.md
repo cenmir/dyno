@@ -70,6 +70,8 @@ dyno/
 │   │   └── SpeedController.h     # PID controller class
 │   └── SerialCommander/
 │       └── SerialCommander.h     # Zero-dependency command handler
+├── tools/
+│   └── dyno_control.ipynb        # Python/Jupyter control panel
 ├── examples/
 │   ├── AS5600_Test/              # Magnetic sensor tutorial
 │   │   └── AS5600_Test.ino
@@ -109,6 +111,11 @@ Custom zero-dependency serial command handler:
 
 ### Available Commands
 ```
+# Automated Testing
+runTest <rpm>           # Run automated torque test (applies brake until stall)
+abortTest               # Abort running test
+
+# Manual Control
 setRPM <value>          # Set PID target RPM (0 to stop)
 status                  # Show RPM, torque, brake position
 autoStatus [true/false] # Toggle live status display
@@ -125,6 +132,12 @@ calibrate               # Interactive calibration
 stop                    # Emergency stop
 help                    # Show all commands
 ```
+
+### Python/Jupyter Interface
+A control notebook is provided in `tools/dyno_control.ipynb`:
+- Interactive buttons for running tests
+- Automated multi-RPM curve generation
+- Real-time plotting of torque-speed curves
 
 ## Common Development Tasks
 

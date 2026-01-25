@@ -97,7 +97,54 @@ Before you can get correct measurements, you must calibrate the load cell. **Thi
 
 ## Measurement Process (Closed-Loop)
 
-Here's how to perform a correct test to measure the motor's performance at a certain RPM:
+There are two ways to run tests: **automated** (recommended) or **manual**.
+
+### Automated Testing (Recommended)
+
+The `runTest` command automatically runs a complete torque test:
+
+1. **Preparation:**
+   * `brakeHome` - Release brake
+   * `tare` - Zero the load cell
+
+2. **Run the test:**
+   ```
+   runTest 500
+   ```
+   This command:
+   - Sets the motor to 500 RPM
+   - Waits for stabilization
+   - Incrementally applies brake (50 steps every 500ms)
+   - Records torque while maintaining speed
+   - Detects stall (when RPM drops below 90% of target for 1 second)
+   - Reports maximum torque achieved
+
+3. **Output format:**
+   ```
+   === AUTOMATED TEST STARTED ===
+   Target RPM: 500
+   DATA:498.2,0.0523,50
+   DATA:499.1,0.0891,100
+   ...
+   === STALL DETECTED ===
+   RESULT:maxTorque=0.2845,stallTorque=0.2712,targetRPM=500.0,stallRPM=421.3
+   --- Test Complete ---
+   Maximum torque at 500 RPM: 0.2845 Nm
+   ```
+
+4. **Abort if needed:** Send `abortTest` to stop a running test.
+
+### Stall Detection Logic
+
+The system detects a stall when:
+- Actual RPM drops below **90%** of target RPM
+- This condition persists for **1 second**
+
+The **maximum torque** reported is the highest torque measured while the motor was still maintaining the target speed (before stall).
+
+### Manual Testing (Alternative)
+
+For more control, you can run tests manually:
 
 1. **Preparation:** Make sure the load cell is calibrated and restart the Arduino.
 2. **Zero brake & load cell:**
@@ -110,6 +157,172 @@ Here's how to perform a correct test to measure the motor's performance at a cer
 7. **Find max torque:** Continue applying the brake until the motor can no longer resist and the speed collapses. The highest torque value you saw just before the motor stalled is the maximum torque for that RPM.
 8. **End the test:** Send `stop` or `setRPM 0` and `brakeHome`.
 9. **Repeat:** Perform the same process for other RPMs (e.g., 200, 400, 800 RPM) to collect data for a complete torque-speed curve.
+
+## Understanding Torque-Speed Curves
+
+### What is a Torque-Speed Curve?
+
+A torque-speed curve shows **how much torque a motor can deliver at different speeds**. This is critical for selecting motors for applications like 3D printers, CNC machines, or robots.
+
+```
+Torque (Nm)
+    │
+0.5 │■■■■
+    │■■■■■■■■
+0.3 │■■■■■■■■■■■■
+    │■■■■■■■■■■■■■■■■
+0.1 │■■■■■■■■■■■■■■■■■■■■
+    └────────────────────────► RPM
+      200   400   600   800
+```
+
+**Key insight:** At low RPM, motors deliver more torque. As speed increases, torque drops due to inductive effects in the motor windings.
+
+### How Torque is Calculated
+
+The load cell measures force on the brake arm. Torque is calculated as:
+
+$$\tau = F \times r$$
+
+Where:
+- $\tau$ = Torque (Nm)
+- $F$ = Force measured by load cell (N) = mass (kg) × 9.81 m/s²
+- $r$ = Brake arm length (m)
+
+In the code ([src/Dyno_ClosedLoop.ino](../src/Dyno_ClosedLoop.ino)):
+```cpp
+#define ARM_LENGTH_METERS  0.1f   // Measure your brake arm!
+#define GRAVITY            9.80665f
+
+float getTorque() {
+  return LoadCell.get_units(1) * GRAVITY * ARM_LENGTH_METERS;
+}
+```
+
+**Important:** You must measure your brake arm length and update `ARM_LENGTH_METERS` for accurate torque readings!
+
+### Why PID Control Matters
+
+Without PID control, when you apply the brake:
+- Motor slows down uncontrollably
+- You don't know what RPM you're measuring at
+
+With PID control:
+- Set exact RPM (e.g., 500 RPM)
+- Apply brake → PID fights to maintain 500 RPM
+- You know precisely: "At 500 RPM, max torque = X Nm"
+
+## Recording Data and Creating the Curve
+
+### Method 1: Python/Jupyter Notebook (Recommended)
+
+A complete Jupyter notebook is provided in `tools/dyno_control.ipynb` with:
+- Serial connection management
+- Interactive buttons for running tests
+- Automated multi-RPM curve generation
+- Real-time plotting
+
+**Setup:**
+```bash
+pip install pyserial matplotlib ipywidgets jupyter
+```
+
+**Usage:**
+1. Open the notebook: `jupyter notebook tools/dyno_control.ipynb`
+2. Update `SERIAL_PORT` to your Arduino's port
+3. Run the cells to connect and test
+
+**Key features:**
+- `run_test(500)` - Run a single test at 500 RPM
+- `generate_torque_curve([200, 400, 600, 800])` - Generate complete curve
+- Interactive control panel with buttons
+
+### Method 2: Manual Recording
+
+1. Run the test as described above
+2. Write down the max torque for each RPM in a table:
+
+| RPM | Max Torque (Nm) |
+|-----|-----------------|
+| 200 | 0.45 |
+| 300 | 0.38 |
+| 400 | 0.32 |
+| 500 | 0.29 |
+| 600 | 0.24 |
+| 700 | 0.18 |
+| 800 | 0.12 |
+
+3. Plot in Excel, Google Sheets, or any plotting tool.
+
+### Method 3: Serial Logging
+
+Use a serial terminal that can log to file:
+
+**PlatformIO:**
+```bash
+pio device monitor > test_data.txt
+```
+
+**Arduino IDE:**
+- No built-in logging, but you can copy/paste from Serial Monitor
+
+**PuTTY (Windows):**
+- Session → Logging → "All session output"
+- Set filename, then connect
+
+**Screen (Linux/Mac):**
+```bash
+screen -L /dev/ttyUSB0 115200
+```
+
+The log file will contain all the `autoStatus` output. Extract the torque values when RPM starts dropping.
+
+### Method 4: Custom Python Script
+
+For custom automation, see `tools/dyno_control.ipynb` as a starting point. The key functions:
+
+```python
+import serial
+
+ser = serial.Serial('COM3', 115200)
+
+# Run automated test
+ser.write(b'runTest 500\n')
+
+# Parse DATA: lines for logging
+# Format: DATA:rpm,torque,brake_pos
+while True:
+    line = ser.readline().decode()
+    if line.startswith('DATA:'):
+        rpm, torque, pos = line[5:].split(',')
+        # Process data...
+    if 'STALL DETECTED' in line:
+        break
+```
+
+### Plotting the Curve
+
+Once you have the data, plot RPM (x-axis) vs Max Torque (y-axis):
+
+**Excel/Google Sheets:**
+1. Enter data in two columns (RPM, Torque)
+2. Insert → Chart → Scatter plot
+
+**Python (matplotlib):**
+```python
+import matplotlib.pyplot as plt
+
+rpm = [200, 300, 400, 500, 600, 700, 800]
+torque = [0.45, 0.38, 0.32, 0.29, 0.24, 0.18, 0.12]
+
+plt.plot(rpm, torque, 'b-o')
+plt.xlabel('RPM')
+plt.ylabel('Torque (Nm)')
+plt.title('Motor Torque-Speed Curve')
+plt.grid(True)
+plt.savefig('torque_curve.png')
+plt.show()
+```
 
 ---
 
