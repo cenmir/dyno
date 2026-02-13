@@ -1,15 +1,15 @@
 /*
- * Dyno - Closed-Loop Speed & Torque Measurement Version
+ * Dyno - Stepper Motor Dynamometer
  *
- * This version uses AS5600 feedback to maintain constant motor speed
- * and an HX711 load cell to measure torque.
+ * Open-loop stepper speed control with AS5600 RPM measurement
+ * and HX711 load cell for torque measurement.
  *
  * Features:
- * - PID-controlled constant RPM on test motor (X-axis)
- * - AS5600 magnetic sensor for accurate speed measurement
+ * - Open-loop speed control (steppers hold speed until stall)
+ * - AS5600 magnetic sensor for RPM measurement & stall detection
  * - HX711-based load cell for torque measurement
  * - SerialCommander for easy control
- * - Manual brake motor control (Y-axis)
+ * - Automated test with progressive brake loading
  *
  * Hardware:
  * - RAMPS 1.4 shield
@@ -19,11 +19,13 @@
  * - HX711 on Digital Pins (D4, D5)
  */
 
+#define VERSION "2.0"
+
+#include <Arduino.h>
 #include <AccelStepper.h>
 #include <Wire.h>
 #include "AS5600.h"
 #include <HX711.h>
-#include "SpeedController.h"
 #include "SerialCommander.h"
 
 // === PIN DEFINITIONS ===
@@ -42,8 +44,8 @@
 #define MAX_SPEED          10000
 #define ACCELERATION       2000
 
-#define TEST_MOTOR_STEPS_PER_REV    200
-#define BRAKE_MOTOR_STEPS_PER_REV   200
+#define TEST_MOTOR_STEPS_PER_REV    (200 * 8)  // 200 full steps × 8 microsteps (TMC2226, no jumpers)
+#define BRAKE_MOTOR_STEPS_PER_REV   (200 * 8)  // 200 full steps × 8 microsteps (TMC2226, no jumpers)
 
 #define ARM_LENGTH_METERS  0.1f   // IMPORTANT: Measure and update this value!
 #define GRAVITY            9.80665f
@@ -53,12 +55,18 @@ AccelStepper testMotor = AccelStepper(AccelStepper::DRIVER, X_STEP_PIN, X_DIR_PI
 AccelStepper brakeMotor = AccelStepper(AccelStepper::DRIVER, Y_STEP_PIN, Y_DIR_PIN);
 AS5600 as5600;
 HX711 LoadCell;
-SpeedController speedController(&testMotor, &as5600, TEST_MOTOR_STEPS_PER_REV);
 SerialCommander cmd;
 
 // === GLOBAL STATE ===
+float targetRPM = 0;
+float currentRPM = 0;
+unsigned long lastRpmTime = 0;
 unsigned long lastStatusTime = 0;
+unsigned long lastSensorTime = 0;
 bool autoStatus = false;
+bool autoSensor = false;
+bool autoLoadCell = false;
+unsigned long lastLoadCellTime = 0;
 long brakePosition = 0;
 
 // === AUTOMATED TEST STATE ===
@@ -74,6 +82,10 @@ float testStallThreshold = 0.90;   // Stall if RPM < 90% of target
 unsigned long testStallDuration = 1000; // ms below threshold to confirm stall
 
 // === FORWARD DECLARATIONS ===
+void updateRPM();
+float getRPM();
+void setMotorRPM(float rpm);
+void stopMotor();
 void displayStatus();
 float getTorque();
 void calibrate();
@@ -83,15 +95,21 @@ void handleBrakeApply(SerialCommander* c);
 void handleBrakeRelease(SerialCommander* c);
 void handleBrakeHome(SerialCommander* c);
 void handleStatus(SerialCommander* c);
-void handleTune(SerialCommander* c);
 void handleStop(SerialCommander* c);
 void handleAutoStatus(SerialCommander* c);
 void handleReadTorque(SerialCommander* c);
+void handleReadLoad(SerialCommander* c);
+void handleDebugLoadCell(SerialCommander* c);
 void handleTare(SerialCommander* c);
 void handleCalibrate(SerialCommander* c);
 void handleHelp(SerialCommander* c);
 void handleRunTest(SerialCommander* c);
 void handleAbortTest(SerialCommander* c);
+void handleDebug(SerialCommander* c);
+void handleEnable(SerialCommander* c);
+void handleDisable(SerialCommander* c);
+void handleReadSensor(SerialCommander* c);
+void handleSetSpeed(SerialCommander* c);
 void runTestStep();
 
 
@@ -113,21 +131,18 @@ void setup() {
 
   // --- Configure Motors ---
   testMotor.setEnablePin(X_ENABLE_PIN);
-  testMotor.setPinsInverted(false, false, true);
-  testMotor.enableOutputs();
+  testMotor.setPinsInverted(true, false, true);  // DIR inverted
+  testMotor.disableOutputs();
   testMotor.setMaxSpeed(MAX_SPEED);
 
   brakeMotor.setEnablePin(Y_ENABLE_PIN);
   brakeMotor.setPinsInverted(false, false, true);
-  brakeMotor.enableOutputs();
+  brakeMotor.disableOutputs();
   brakeMotor.setMaxSpeed(MAX_SPEED);
   brakeMotor.setAcceleration(ACCELERATION);
 
-  // --- Initialize Controllers ---
-  speedController.begin();
-
   // --- Register Commands ---
-  cmd.begin("Dyno Ready - Closed-Loop Control v1.2");
+  cmd.begin("Dyno Ready - Open-Loop Control v" VERSION);
   cmd.addCommand("setRPM", handleSetRPM);
   cmd.addCommand("brake", handleBrake);
   cmd.addCommand("brakeApply", handleBrakeApply);
@@ -135,26 +150,55 @@ void setup() {
   cmd.addCommand("brakeHome", handleBrakeHome);
   cmd.addCommand("status", handleStatus);
   cmd.addCommand("autoStatus", handleAutoStatus);
-  cmd.addCommand("tune", handleTune);
   cmd.addCommand("readTorque", handleReadTorque);
+  cmd.addCommand("readLoad", handleReadLoad);
+  cmd.addCommand("debugLoad", handleDebugLoadCell);
   cmd.addCommand("tare", handleTare);
   cmd.addCommand("calibrate", handleCalibrate);
   cmd.addCommand("stop", handleStop);
   cmd.addCommand("help", handleHelp);
   cmd.addCommand("runTest", handleRunTest);
   cmd.addCommand("abortTest", handleAbortTest);
+  cmd.addCommand("debug", handleDebug);
+  cmd.addCommand("enable", handleEnable);
+  cmd.addCommand("disable", handleDisable);
+  cmd.addCommand("readSensor", handleReadSensor);
+  cmd.addCommand("setSpeed", handleSetSpeed);
 
   Serial.println("Type 'help' for available commands");
 }
 
 void loop() {
   cmd.process();
-  speedController.update();
+  updateRPM();
+  testMotor.runSpeed();
   brakeMotor.run();
 
   // Run automated test step if active
   if (testRunning) {
     runTestStep();
+  }
+
+  if (autoSensor && (millis() - lastSensorTime > 300)) {
+    int angle = as5600.readAngle();
+    float degrees = angle * 360.0 / 4096.0;
+    Serial.print("Angle: ");
+    Serial.print(angle);
+    Serial.print(" (");
+    Serial.print(degrees, 1);
+    Serial.print(" deg) | RPM: ");
+    Serial.println(getRPM(), 2);
+    lastSensorTime = millis();
+  }
+
+  if (autoLoadCell && (millis() - lastLoadCellTime > 300)) {
+    if (LoadCell.is_ready()) {
+      Serial.print("RAW:");
+      Serial.print(LoadCell.read());
+      Serial.print(" | UNITS:");
+      Serial.println(LoadCell.get_units(1), 4);
+    }
+    lastLoadCellTime = millis();
   }
 
   if (autoStatus && (millis() - lastStatusTime > 500)) {
@@ -163,13 +207,40 @@ void loop() {
   }
 }
 
+// ==================== RPM & Motor Helpers ====================
+
+void updateRPM() {
+  if (millis() - lastRpmTime >= 100) {
+    currentRPM = -as5600.getAngularSpeed(AS5600_MODE_DEGREES) / 6.0;
+    lastRpmTime = millis();
+  }
+}
+
+float getRPM() {
+  return currentRPM;
+}
+
+void setMotorRPM(float rpm) {
+  targetRPM = rpm;
+  float stepsPerSec = rpm * TEST_MOTOR_STEPS_PER_REV / 60.0;
+  testMotor.setSpeed(stepsPerSec);
+}
+
+void stopMotor() {
+  targetRPM = 0;
+  testMotor.setSpeed(0);
+}
+
 // ==================== Command Handlers ====================
 
 void handleSetRPM(SerialCommander* c) {
   float rpm = c->getFloat(0);
-  speedController.setTargetRPM(rpm);
-  Serial.print("Target RPM set to: ");
-  Serial.println(rpm);
+  setMotorRPM(rpm);
+  Serial.print("RPM set to: ");
+  Serial.print(rpm, 0);
+  Serial.print(" (");
+  Serial.print(rpm * TEST_MOTOR_STEPS_PER_REV / 60.0, 0);
+  Serial.println(" steps/s)");
 }
 
 void handleBrake(SerialCommander* c) {
@@ -219,21 +290,31 @@ void handleAutoStatus(SerialCommander* c) {
   Serial.println(autoStatus ? "ON" : "OFF");
 }
 
-void handleTune(SerialCommander* c) {
-  if (c->getParamCount() < 3) {
-    Serial.println("Usage: tune <kp> <ki> <kd>"); return;
-  }
-  float kp = c->getFloat(0);
-  float ki = c->getFloat(1);
-  float kd = c->getFloat(2);
-  speedController.setPID(kp, ki, kd);
-  Serial.println("PID parameters updated.");
-}
-
 void handleReadTorque(SerialCommander* c) {
   Serial.print("Torque: ");
   Serial.print(getTorque(), 4);
   Serial.println(" Nm");
+}
+
+void handleReadLoad(SerialCommander* c) {
+  if (LoadCell.is_ready()) {
+    float m = LoadCell.get_units(1); //kg
+    Serial.print("Load: ");
+    Serial.print(m, 4);
+    Serial.print(" kg | Force: ");
+    Serial.print(m * GRAVITY, 4);
+    Serial.print(" N | Torque: ");
+    Serial.print(m * GRAVITY * ARM_LENGTH_METERS, 4);
+    Serial.println(" Nm");
+  } else {
+    Serial.println("Load cell not ready.");
+  }
+}
+
+void handleDebugLoadCell(SerialCommander* c) {
+  autoLoadCell = !autoLoadCell;
+  Serial.print("Load cell debug: ");
+  Serial.println(autoLoadCell ? "ON" : "OFF");
 }
 
 void handleTare(SerialCommander* c) {
@@ -246,23 +327,75 @@ void handleCalibrate(SerialCommander* c) {
   calibrate();
 }
 
+void handleDebug(SerialCommander* c) {
+  Serial.print("AS5600 angle: ");
+  Serial.print(as5600.readAngle());
+  Serial.print(" | raw: ");
+  Serial.print(as5600.rawAngle());
+  Serial.print(" | speed: ");
+  Serial.print(testMotor.speed(), 1);
+  Serial.print(" steps/s | pos: ");
+  Serial.print(testMotor.currentPosition());
+  Serial.print(" | RPM: ");
+  Serial.println(getRPM(), 2);
+}
+
+void handleReadSensor(SerialCommander* c) {
+  if (c->getParamCount() > 0 && c->getString(0)[0] == 'C') {
+    autoSensor = !autoSensor;
+    Serial.print("Continuous sensor: ");
+    Serial.println(autoSensor ? "ON" : "OFF");
+    return;
+  }
+  int angle = as5600.readAngle();
+  float degrees = angle * 360.0 / 4096.0;
+  Serial.print("Angle: ");
+  Serial.print(angle);
+  Serial.print(" (");
+  Serial.print(degrees, 1);
+  Serial.print(" deg) | RPM: ");
+  Serial.println(getRPM(), 2);
+}
+
+void handleSetSpeed(SerialCommander* c) {
+  float stepsPerSec = c->getFloat(0);
+  targetRPM = stepsPerSec * 60.0 / TEST_MOTOR_STEPS_PER_REV;
+  testMotor.setSpeed(stepsPerSec);
+  Serial.print("Open-loop speed: ");
+  Serial.print(stepsPerSec, 0);
+  Serial.println(" steps/s");
+}
+
+void handleEnable(SerialCommander* c) {
+  testMotor.enableOutputs();
+  brakeMotor.enableOutputs();
+  Serial.println("All motors enabled.");
+}
+
+void handleDisable(SerialCommander* c) {
+  stopMotor();
+  testMotor.disableOutputs();
+  brakeMotor.disableOutputs();
+  Serial.println("All motors disabled.");
+}
+
 void handleStop(SerialCommander* c) {
-  speedController.setTargetRPM(0);
+  stopMotor();
   brakeMotor.stop();
   Serial.println("EMERGENCY STOP - All motors stopped");
 }
 
 void handleHelp(SerialCommander* c) {
-  Serial.println("\n=== Dyno Commands ===");
+  Serial.println("\n=== Dyno v" VERSION " - Commands ===");
   Serial.println("\n--- Automated Testing ---");
   Serial.println("runTest <rpm>           - Run automated torque test at specified RPM");
   Serial.println("abortTest               - Abort running test");
 
-  Serial.println("\n--- Test Motor & PID ---");
-  Serial.println("setRPM <value>          - Set target RPM (0 to disable)");
+  Serial.println("\n--- Test Motor ---");
+  Serial.println("setRPM <value>          - Set motor speed in RPM (0 to stop)");
+  Serial.println("setSpeed <steps/s>      - Set motor speed in steps/s (raw)");
   Serial.println("status                  - Display current system status");
   Serial.println("autoStatus [true/false] - Toggle auto status display");
-  Serial.println("tune <kp> <ki> <kd>     - Tune PID parameters");
 
   Serial.println("\n--- Brake Control ---");
   Serial.println("brake <steps>           - Move brake motor (+apply / -release)");
@@ -270,12 +403,20 @@ void handleHelp(SerialCommander* c) {
   Serial.println("brakeRelease [steps]    - Release brake (default: 500)");
   Serial.println("brakeHome               - Return brake to home position (0)");
 
-  Serial.println("\n--- Torque Measurement ---");
-  Serial.println("readTorque              - Read current torque from load cell");
+  Serial.println("\n--- Load Cell & Torque ---");
+  Serial.println("readLoad                - Read load (kg), force (N), torque (Nm)");
+  Serial.println("readTorque              - Read torque only (Nm)");
+  Serial.println("debugLoad               - Toggle raw load cell output (every 300ms)");
   Serial.println("tare                    - Zero the load cell");
   Serial.println("calibrate               - Run interactive load cell calibration");
 
-  Serial.println("\n--- Safety ---");
+  Serial.println("\n--- Sensors & Debug ---");
+  Serial.println("readSensor [C]          - Read AS5600 angle & RPM (C=continuous)");
+  Serial.println("debug                   - Show raw sensor/motor values");
+
+  Serial.println("\n--- Motor Power ---");
+  Serial.println("enable                  - Enable all motor drivers");
+  Serial.println("disable                 - Disable all motor drivers");
   Serial.println("stop                    - Emergency stop all motors");
 }
 
@@ -284,9 +425,9 @@ void handleHelp(SerialCommander* c) {
 void displayStatus() {
   Serial.println("--- Status ---");
   Serial.print("Test Motor: Target=");
-  Serial.print(speedController.getTargetRPM(), 1);
-  Serial.print(" RPM | Current=");
-  Serial.print(speedController.getCurrentRPM(), 1);
+  Serial.print(targetRPM, 1);
+  Serial.print(" RPM | Measured=");
+  Serial.print(getRPM(), 1);
   Serial.println(" RPM");
 
   Serial.print("Brake Motor: Position=");
@@ -371,8 +512,8 @@ void handleRunTest(SerialCommander* c) {
   brakeMotor.moveTo(0);
   brakePosition = 0;
 
-  // Start motor at target RPM
-  speedController.setTargetRPM(rpm);
+  // Start motor at target RPM (open-loop)
+  setMotorRPM(rpm);
 
   Serial.println("\n=== AUTOMATED TEST STARTED ===");
   Serial.print("Target RPM: ");
@@ -391,7 +532,7 @@ void handleAbortTest(SerialCommander* c) {
   }
 
   testRunning = false;
-  speedController.setTargetRPM(0);
+  stopMotor();
   brakeMotor.moveTo(0);
   brakePosition = 0;
 
@@ -402,7 +543,7 @@ void handleAbortTest(SerialCommander* c) {
 }
 
 void runTestStep() {
-  float currentRPM = speedController.getCurrentRPM();
+  float measuredRPM = getRPM();
   float currentTorque = getTorque();
   unsigned long now = millis();
 
@@ -412,7 +553,7 @@ void runTestStep() {
   }
 
   // Check if speed is within acceptable range
-  float rpmRatio = currentRPM / testTargetRPM;
+  float rpmRatio = measuredRPM / testTargetRPM;
   bool speedOK = (rpmRatio >= testStallThreshold);
 
   // Track maximum torque while maintaining speed
@@ -437,7 +578,7 @@ void runTestStep() {
       Serial.print(",targetRPM=");
       Serial.print(testTargetRPM, 1);
       Serial.print(",stallRPM=");
-      Serial.println(currentRPM, 1);
+      Serial.println(measuredRPM, 1);
 
       Serial.println("\n--- Test Complete ---");
       Serial.print("Maximum torque at ");
@@ -447,7 +588,7 @@ void runTestStep() {
       Serial.println(" Nm");
 
       // Stop motor and return brake
-      speedController.setTargetRPM(0);
+      stopMotor();
       brakeMotor.moveTo(0);
       brakePosition = 0;
       return;
@@ -464,7 +605,7 @@ void runTestStep() {
 
     // Output data point for logging
     Serial.print("DATA:");
-    Serial.print(currentRPM, 1);
+    Serial.print(measuredRPM, 1);
     Serial.print(",");
     Serial.print(currentTorque, 4);
     Serial.print(",");

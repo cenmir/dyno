@@ -16,7 +16,8 @@ The dynamometer uses a **dual-motor system**:
 
 1. **Test Motor (Motor Under Test)**
    - NEMA 17 stepper or BLDC motor being characterized
-   - Runs at constant RPM (PID-controlled) while brake is progressively applied
+   - Runs at constant RPM (open-loop) while brake is progressively applied
+   - Stepper motors maintain commanded speed until stall (no PID needed)
    - Performance specs: up to 0.8 Nm torque, max 3000 RPM
 
 2. **Brake Actuator Motor**
@@ -27,10 +28,11 @@ The dynamometer uses a **dual-motor system**:
 ### Measurement System
 
 - **AS5600 Magnetic Sensor:** Measures actual RPM of test motor (contactless, I2C, 12-bit resolution)
-  - Advantage over optical encoders: No mechanical contact, dust-resistant
+  - Used for RPM verification and stall detection (not feedback control)
+  - RPM sampled every 100ms using `getAngularSpeed(AS5600_MODE_DEGREES)`
   - See `docs/AS5600_code_explanation.md` for implementation details
 - **Load Cell:** 5 kg full Wheatstone bridge with HX711 amplifier
-  - Measures force on brake arm, converts to torque (τ = F × r)
+  - Measures force on brake arm, converts to torque (t = F x r)
   - Requires calibration with known weights before testing
 - **Test Procedure:** Set constant RPM, increase brake force until motor stalls, record max torque vs RPM
 
@@ -38,7 +40,7 @@ The dynamometer uses a **dual-motor system**:
 
 Based on Engineer Bo's NEMA17 dynamometer project. Our improvements:
 - AS5600 (contactless magnetic) instead of optical encoder (more reliable)
-- **Closed-loop PID speed control** for maintaining constant RPM under load
+- **Open-loop speed control** with AS5600 stall detection
 - SerialCommander for automated test procedures
 - See `docs/background.md` for project inspiration and comparison
 
@@ -47,8 +49,9 @@ See `docs/PROJECT_DESCRIPTION.md` for complete technical specification.
 ## Hardware Configuration
 
 - **Platform:** Arduino Mega with RAMPS 1.4 shield
-- **Stepper Motors:** Connected via RAMPS
-  - Test Motor (X-axis): STEP=54, DIR=55, ENABLE=38
+- **Stepper Drivers:** TMC2226 (8 microsteps default, no jumpers on RAMPS)
+- **Stepper Motors:** Connected via RAMPS, 200 full steps x 8 microsteps = 1600 steps/rev
+  - Test Motor (X-axis): STEP=54, DIR=55, ENABLE=38 (DIR inverted)
   - Brake Actuator Motor (Y-axis): STEP=60, DIR=61, ENABLE=56
 - **Sensors:**
   - AS5600 magnetic rotary encoder (I2C: SDA=20, SCL=21) - RPM measurement
@@ -58,49 +61,48 @@ See `docs/PROJECT_DESCRIPTION.md` for complete technical specification.
   - Trapezoidal screw for wire actuation
   - Brake arm with measured length for torque calculation
 - **Serial:** 115200 baud
+- **Motors disabled by default** on startup (send `enable` to power)
 
 ## Project Structure (PlatformIO)
 
 ```
 dyno/
 ├── src/
-│   └── Dyno_ClosedLoop.ino       # Main application (PID + sensors)
+│   └── main.cpp                 # Main application (open-loop control v2.0)
 ├── lib/
-│   ├── SpeedController/
-│   │   └── SpeedController.h     # PID controller class
-│   └── SerialCommander/
-│       └── SerialCommander.h     # Zero-dependency command handler
+│   ├── SerialCommander/
+│   │   └── SerialCommander.h    # Zero-dependency command handler
+│   └── SpeedController/
+│       └── SpeedController.h    # PID controller (kept for reference, unused)
 ├── tools/
-│   └── dyno_control.ipynb        # Python/Jupyter control panel
+│   └── dyno_control.ipynb       # Python/Jupyter control panel
 ├── examples/
-│   ├── AS5600_Test/              # Magnetic sensor tutorial
+│   ├── AS5600_Test/             # Magnetic sensor tutorial
 │   │   └── AS5600_Test.ino
-│   ├── loadcellTest/             # Load cell calibration tool
+│   ├── loadcellTest/            # Load cell calibration tool
 │   │   └── loadcellTest.ino
-│   └── CmdParserExample/         # Alternative using CmdParser library
+│   └── CmdParserExample/        # Alternative using CmdParser library
 │       └── CmdParserExample.ino
 ├── docs/
-│   ├── guide.md                  # Complete user & technical guide
-│   ├── PROJECT_DESCRIPTION.md    # Detailed specification
-│   ├── SpeedController_explanation.md  # PID code explanation
+│   ├── guide.md                 # Complete user & technical guide
+│   ├── PROJECT_DESCRIPTION.md   # Detailed specification
 │   ├── AS5600_code_explanation.md
 │   ├── I2C_explanation.md
 │   └── background.md
-├── platformio.ini                # PlatformIO configuration
-├── README.md                     # Project overview
-├── LICENSE                       # MIT License
-└── CLAUDE.md                     # This file
+├── platformio.ini               # PlatformIO configuration
+├── README.md                    # Project overview
+├── LICENSE                      # MIT License
+└── CLAUDE.md                    # This file
 ```
 
 ## Key Features
 
-### Closed-Loop Speed Control
-The main application uses PID control to maintain constant test motor RPM:
-- AS5600 provides real-time RPM feedback
-- PID controller adjusts motor speed to compensate for brake load
-- Configurable via `tune <kp> <ki> <kd>` command
-- Default: Kp=50, Ki=10, Kd=1
-- See `docs/SpeedController_explanation.md` for detailed code walkthrough
+### Open-Loop Speed Control
+The main application uses open-loop stepper control with AS5600 monitoring:
+- `setMotorRPM(rpm)` converts RPM to steps/s: `rpm * 1600 / 60`
+- AS5600 provides RPM measurement for stall detection
+- `updateRPM()` samples every 100ms using `getAngularSpeed()`
+- No PID needed: steppers hold speed until stall
 
 ### SerialCommander
 Custom zero-dependency serial command handler:
@@ -115,20 +117,32 @@ Custom zero-dependency serial command handler:
 runTest <rpm>           # Run automated torque test (applies brake until stall)
 abortTest               # Abort running test
 
-# Manual Control
-setRPM <value>          # Set PID target RPM (0 to stop)
+# Test Motor Control
+setRPM <value>          # Set motor speed in RPM (open-loop, 0 to stop)
+setSpeed <steps/s>      # Set motor speed in raw steps/s
 status                  # Show RPM, torque, brake position
 autoStatus [true/false] # Toggle live status display
-tune <kp> <ki> <kd>     # Adjust PID parameters
 
+# Brake Control
+brake <steps>           # Move brake motor (+apply / -release)
 brakeApply [steps]      # Apply brake (default: 500)
 brakeRelease [steps]    # Release brake (default: 500)
 brakeHome               # Return brake to zero
 
-readTorque              # Read current torque (Nm)
+# Load Cell & Torque
+readLoad                # Read load (kg), force (N), torque (Nm)
+readTorque              # Read torque only (Nm)
+debugLoad               # Toggle raw load cell output (every 300ms)
 tare                    # Zero the load cell
 calibrate               # Interactive calibration
 
+# Sensors & Debug
+readSensor [C]          # Read AS5600 angle & RPM (C=continuous)
+debug                   # Show raw sensor/motor values
+
+# Motor Power
+enable                  # Enable all motor drivers
+disable                 # Disable all motor drivers
 stop                    # Emergency stop
 help                    # Show all commands
 ```
@@ -156,9 +170,9 @@ pio device monitor
 
 ### Building & Uploading (Arduino IDE)
 
-1. Copy `lib/SpeedController/SpeedController.h` and `lib/SerialCommander/SerialCommander.h` to Arduino libraries folder
+1. Copy `lib/SerialCommander/SerialCommander.h` to Arduino libraries folder
 2. Install required libraries via Library Manager
-3. Open `src/Dyno_ClosedLoop.ino` and upload
+3. Rename `src/main.cpp` to `.ino` and upload
 
 ### Required Libraries (managed by PlatformIO)
 - **robtillaart/AS5600** - Magnetic encoder
@@ -167,9 +181,10 @@ pio device monitor
 
 ### Testing
 1. Open Serial Monitor at 115200 baud
-2. Verify startup: `Dyno Ready - Closed-Loop Control v1.2`
+2. Verify startup: `Dyno Ready - Open-Loop Control v2.0`
 3. Check sensor: `AS5600 connected: Yes`
-4. Test basic commands: `setRPM 100`, `status`, `brakeApply`
+4. Send `enable` to power motors
+5. Test basic commands: `setRPM 100`, `status`, `brakeApply`
 
 ## Architecture Notes
 
@@ -179,11 +194,12 @@ pio device monitor
 - Modular independence - each example works standalone
 - Comprehensive documentation with code explanations
 
-### SpeedController Class
+### Motor Control Functions
 ```cpp
-SpeedController speedController(&testMotor, &as5600, STEPS_PER_REV);
-speedController.setTargetRPM(100);
-speedController.update();  // Call in loop()
+void setMotorRPM(float rpm);  // Set RPM (converts to steps/s)
+void stopMotor();              // Stop test motor
+void updateRPM();              // Sample AS5600 (call in loop)
+float getRPM();                // Get last measured RPM
 ```
 
 ### Adding Commands

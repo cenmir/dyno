@@ -4,11 +4,7 @@
  * Uses AS5600 magnetic sensor feedback to maintain constant RPM even under
  * varying load conditions (e.g., brake application in dynamometer testing)
  *
- * Features:
- * - PID control for accurate speed regulation
- * - RPM calculation from AS5600 angle readings
- * - Configurable PID parameters
- * - Automatic speed adjustment
+ * Uses AS5600 library's getAngularSpeed() for RPM measurement.
  *
  * Usage:
  *   SpeedController controller(&stepper, &as5600);
@@ -33,8 +29,7 @@ public:
   SpeedController(AccelStepper* motor, AS5600* sensor, int stepsPerRev = 200)
     : motor(motor), sensor(sensor), stepsPerRevolution(stepsPerRev),
       targetRPM(0), currentRPM(0),
-      lastAngle(0), lastTime(0), enabled(false),
-      integral(0), lastError(0) {
+      enabled(false), integral(0), lastError(0), lastUpdateTime(0) {
 
     // Default PID parameters (tune these for your system)
     kp = 50.0;    // Proportional gain
@@ -47,9 +42,7 @@ public:
 
   // Initialize the controller
   void begin() {
-    lastAngle = sensor->readAngle();
-    lastTime = millis();
-    revolutions = 0;
+    sensor->resetCumulativePosition();
     enabled = false;
   }
 
@@ -85,16 +78,21 @@ public:
 
   // Main update function - call this in loop()
   void update() {
+    // Update RPM at fixed interval to avoid aliasing from AS5600 quantization
+    unsigned long now = millis();
+    if (now - lastRpmTime >= rpmInterval) {
+      float degPerSec = sensor->getAngularSpeed(AS5600_MODE_DEGREES);
+      currentRPM = -degPerSec / 6.0;  // Negate to match motor direction
+      lastRpmTime = now;
+    }
+
     if (!enabled) {
       motor->runSpeed();
       return;
     }
 
-    // Calculate current RPM
-    calculateRPM();
-
     // PID control
-    unsigned long now = millis();
+    now = millis();
     float dt = (now - lastUpdateTime) / 1000.0;  // Convert to seconds
 
     if (dt >= 0.01) {  // Update at ~100 Hz max
@@ -175,47 +173,10 @@ private:
   float lastError;
   float integralLimit;
 
-  // RPM calculation
-  int lastAngle;
-  unsigned long lastTime;
   unsigned long lastUpdateTime;
-  long revolutions;
+  unsigned long lastRpmTime = 0;
+  unsigned long rpmInterval = 100;  // ms between RPM samples
   bool enabled;
-
-  // Calculate RPM from AS5600 readings
-  void calculateRPM() {
-    int currentAngle = sensor->readAngle();
-    unsigned long currentTime = millis();
-
-    // Detect full revolution (angle wraps from 4095 to 0)
-    int angleDiff = currentAngle - lastAngle;
-
-    // Handle wrap-around
-    if (angleDiff < -2048) {
-      // Wrapped forward (0 -> 4095)
-      revolutions++;
-    } else if (angleDiff > 2048) {
-      // Wrapped backward (4095 -> 0)
-      revolutions--;
-    }
-
-    // Calculate time difference in minutes
-    float timeDiff = (currentTime - lastTime) / 60000.0;  // ms to minutes
-
-    if (timeDiff > 0.05) {  // Update RPM every 50ms minimum
-      // Calculate total angle change in degrees
-      float totalAngle = (revolutions * 4096.0 + currentAngle) - lastAngle;
-      float degrees = (totalAngle / 4096.0) * 360.0;
-
-      // Calculate RPM
-      currentRPM = degrees / (360.0 * timeDiff);
-
-      // Reset for next calculation
-      lastAngle = currentAngle;
-      lastTime = currentTime;
-      revolutions = 0;
-    }
-  }
 };
 
 #endif
