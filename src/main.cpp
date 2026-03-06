@@ -19,7 +19,7 @@
  * - HX711 on Digital Pins (D4, D5)
  */
 
-#define VERSION "2.0"
+#define VERSION "2.1.0"
 
 #include <Arduino.h>
 #include <AccelStepper.h>
@@ -50,6 +50,8 @@
 
 #define TEST_MOTOR_STEPS_PER_REV    (200 * 8)  // 200 full steps × 8 microsteps (TMC2226, no jumpers)
 #define BRAKE_MOTOR_STEPS_PER_REV   (200 * 8)  // 200 full steps × 8 microsteps (TMC2226, no jumpers)
+
+#define SCREW_PITCH        2 //Skruvstigning borde vara 2mm för trapetsskruven
 
 #define ARM_LENGTH_METERS  0.1f   // IMPORTANT: Measure and update this value!
 #define GRAVITY            9.80665f
@@ -114,6 +116,7 @@ void handleEnable(SerialCommander* c);
 void handleDisable(SerialCommander* c);
 void handleReadSensor(SerialCommander* c);
 void handleSetSpeed(SerialCommander* c);
+void brakeMotorMove(SerialCommander* c);
 void runTestStep();
 
 
@@ -148,6 +151,7 @@ void setup() {
   cmd.begin("Dyno Ready - Open-Loop Control v" VERSION);
   cmd.addCommand("setRPM", handleSetRPM);
   cmd.addCommand("brake", handleBrake);
+  cmd.addCommand("brakeMove", brakeMotorMove); //Ange hur många mm du vill flytta vajern
   cmd.addCommand("brakeApply", handleBrakeApply);
   cmd.addCommand("brakeRelease", handleBrakeRelease);
   cmd.addCommand("brakeHome", handleBrakeHome);
@@ -244,6 +248,18 @@ void handleSetRPM(SerialCommander* c) {
   Serial.print(" (");
   Serial.print(rpm * TEST_MOTOR_STEPS_PER_REV / 60.0, 0);
   Serial.println(" steps/s)");
+}
+
+void brakeMotorMove(SerialCommander* c) {
+  long dist = c->getInt(0); // i millimeter
+  int pitch = SCREW_PITCH;
+  long steps = BRAKE_MOTOR_STEPS_PER_REV * dist / pitch;
+  brakeMotor.move(steps);
+  brakePosition += steps;
+  Serial.print("Brake motor moving ");
+  Serial.print(steps);
+  Serial.print(" steps. New position: ");
+  Serial.println(brakePosition);
 }
 
 void handleBrake(SerialCommander* c) {
