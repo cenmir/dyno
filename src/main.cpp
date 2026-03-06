@@ -40,6 +40,10 @@
 #define LOADCELL_DOUT_PIN  4
 #define LOADCELL_SCK_PIN   5
 
+// === LOAD CELL CALIBRATION ===
+#define LOADCELL_OFFSET    -580885L
+#define LOADCELL_SCALE     426.554412841796875f
+
 // === MOTOR & PHYSICAL CONSTANTS ===
 #define MAX_SPEED          10000
 #define ACCELERATION       2000
@@ -124,14 +128,13 @@ void setup() {
 
   // --- Initialize Load Cell (HX711) ---
   LoadCell.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  // IMPORTANT: Run 'calibrate' and update these values!
-  LoadCell.set_offset(0);
-  LoadCell.set_scale(1.0f);
+  LoadCell.set_offset(LOADCELL_OFFSET);
+  LoadCell.set_scale(LOADCELL_SCALE);
   Serial.print("HX711 initialized. Ready for calibration ('tare' then 'calibrate').\n");
 
   // --- Configure Motors ---
   testMotor.setEnablePin(X_ENABLE_PIN);
-  testMotor.setPinsInverted(true, false, true);  // DIR inverted
+  testMotor.setPinsInverted(false, false, true);  
   testMotor.disableOutputs();
   testMotor.setMaxSpeed(MAX_SPEED);
 
@@ -298,7 +301,8 @@ void handleReadTorque(SerialCommander* c) {
 
 void handleReadLoad(SerialCommander* c) {
   if (LoadCell.is_ready()) {
-    float m = LoadCell.get_units(1); //kg
+    float m = LoadCell.get_units(1); //g
+    m = m / 1000.0f; // Convert to kg
     Serial.print("Load: ");
     Serial.print(m, 4);
     Serial.print(" kg | Force: ");
@@ -442,7 +446,7 @@ void displayStatus() {
 
 float getTorque() {
   if (LoadCell.is_ready()) {
-    return LoadCell.get_units(1) * GRAVITY * ARM_LENGTH_METERS;
+    return (LoadCell.get_units(1) / 1000.0f) * GRAVITY * ARM_LENGTH_METERS;
   }
   return 0.0f;
 }
@@ -465,13 +469,14 @@ void calibrate() {
 
   Serial.println("3. Place a known weight on the load cell.");
   while (Serial.available()) Serial.read();
-  Serial.println("4. Enter the weight in kilograms (e.g., 0.5) and press Enter.");
+  Serial.println("4. Enter the weight in grams (e.g., 500) and press Enter.");
   while (Serial.available() == 0);
-  float known_weight_kg = Serial.parseFloat();
-  Serial.print("Using known weight (kg): ");
-  Serial.println(known_weight_kg, 4);
+  uint16_t known_weight_g = (uint16_t)Serial.parseInt();
+  Serial.print("Using known weight: ");
+  Serial.print(known_weight_g);
+  Serial.println(" g");
 
-  LoadCell.calibrate_scale(known_weight_kg, 20);
+  LoadCell.calibrate_scale(known_weight_g, 20);
   float scale = LoadCell.get_scale();
   Serial.print("SCALE:  ");
   Serial.println(scale, 15);
