@@ -25,7 +25,7 @@
 #include <Arduino.h>
 
 // Maximum number of commands and parameters
-#define MAX_COMMANDS 20
+#define MAX_COMMANDS 25
 #define MAX_PARAMS 10
 #define BUFFER_SIZE 64
 
@@ -92,6 +92,11 @@ public:
   // Get the number of parameters
   int getParamCount() {
     return paramCount;
+  }
+
+  // Returns true if a partial command is in the buffer (bytes received but no newline yet)
+  bool isReceiving() {
+    return cmdIndex > 0 || Serial.available();
   }
 
   // Print a help message with all registered commands

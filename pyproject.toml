@@ -1,0 +1,12 @@
+[project]
+name = "dyno-tools"
+version = "0.1.0"
+description = "Python tools for the Arduino dynamometer"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial",
+    "matplotlib",
+    "numpy",
+    "ipywidgets",
+    "ipykernel",
+]

@@ -57,5 +57,13 @@ _book/
 *.toc
 *.out
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Test results (generated per-session)
+tools/results/
+
 # Claude Code
 .claude/settings.local.json

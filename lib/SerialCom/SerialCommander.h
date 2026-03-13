@@ -94,6 +94,11 @@ public:
     return paramCount;
   }
 
+  // Returns true if a partial command is in the buffer (bytes received but no newline yet)
+  bool isReceiving() {
+    return cmdIndex > 0 || Serial.available();
+  }
+
   // Print a help message with all registered commands
   void printHelp() {
     Serial.println("Available commands:");
@@ -170,7 +175,6 @@ private:
     if (!found) {
       Serial.print("Unknown command: ");
       Serial.println(command);
-      printHelp();
     }
   }
 };
